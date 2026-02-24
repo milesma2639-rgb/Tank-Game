@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Iron & Rust: Squad Combat</title>
+    <style>
+        :root { --mud: #26241e; --rust: #8b4513; --iron: #3a362d; --text: #d4cbb3; }
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #12110e; color: var(--text);
+            margin: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            min-height: 100vh; overflow: hidden; user-select: none;
+        }
+        #menu, #gameOver {
+            background: rgba(20, 18, 15, 0.98); padding: 30px;
+            border: 3px solid var(--rust); text-align: center;
+            position: absolute; z-index: 100; box-shadow: 0 0 50px #000;
+        }
+        .btn {
+            background: #3d3021; color: var(--text); border: 2px solid var(--rust);
+            padding: 12px 24px; cursor: pointer; text-transform: uppercase;
+            font-weight: bold; margin-top: 15px; width: 100%;
+        }
+        .btn:hover { background: var(--rust); color: #fff; }
+        select {
+            width: 100%; background: #1a1814; color: #a68b6a; 
+            border: 1px solid var(--rust); padding: 8px; margin: 10px 0;
+            font-family: monospace;
+        }
+        canvas {
+            border: 8px solid #2e2a1f; background: var(--mud); display: none; 
+            box-shadow: 0 0 100px #000;
+        }
+        #ui-overlay {
+            position: absolute; top: 20px; left: 20px; font-weight: bold;
+            pointer-events: none; text-shadow: 2px 2px 0 #000; z-index: 10;
+        }
+        #controls-hud {
+            position: absolute; bottom: 20px; display: flex; gap: 10px;
+        }
+        .hud-box {
+            background: rgba(0,0,0,0.7); padding: 5px 10px; border: 1px solid var(--rust);
+            font-size: 10px; color: var(--text);
+        }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-overlay" class="hidden"></div>
+    <div id="controls-hud" class="hidden"></div>
+
+    <div id="menu">
+        <h1 style="color:var(--rust); margin:0;">IRON & RUST: SQUADS</h1>
+        <p style="font-size:10px; opacity:0.6;">[ MULTIPLAYER PROTOCOL ENABLED ]</p>
+        
+        <div style="text-align: left; margin-top: 20px;">
+            <label style="font-size: 11px;">SQUAD COMPOSITION:</label>
+            <select id="playerCount">
+                <option value="1">1 ROOKIE / 3 TIN-MEN</option>
+                <option value="2">2 ROOKIES / 2 TIN-MEN</option>
+                <option value="3">3 ROOKIES / 1 TIN-MAN</option>
+                <option value="4">4 ROOKIES (ALL-OUT WAR)</option>
+            </select>
+        </div>
+
+        <button class="btn" onclick="startGame()">DROP IN</button>
+    </div>
+
+    <div id="gameOver" class="hidden">
+        <h1 id="winnerText" style="color:var(--rust)">SECTOR PURGED</h1>
+        <button class="btn" onclick="returnToMenu()">RTB</button>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const menu = document.getElementById('menu');
+    const uiOverlay = document.getElementById('ui-overlay');
+    const hud = document.getElementById('controls-hud');
+    const gameOverScreen = document.getElementById('gameOver');
+    const winnerText = document.getElementById('winnerText');
+
+    const keys = {};
+    window.addEventListener('keydown', e => keys[e.code] = true);
+    window.addEventListener('keyup', e => keys[e.code] = false);
+
+    let tanks = [], bullets = [], walls = [], particles = [], tracks = [];
+    let gameActive = false, shakeIntensity = 0;
+
+    const pConfigs = [
+        { color: '#4d6635', name: 'FORREST', keys: { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', shoot: 'KeyQ' }, sx: 80, sy: 80, hint: 'WASD+Q' },
+        { color: '#bda27e', name: 'DESERT',  keys: { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', shoot: 'KeyM' }, sx: 720, sy: 520, hint: 'ARROWS+M' },
+        { color: '#5c6670', name: 'URBAN',   keys: { up: 'KeyI', down: 'KeyK', left: 'KeyJ', right: 'KeyL', shoot: 'KeyU' }, sx: 720, sy: 80, hint: 'IJKL+U' },
+        { color: '#827237', name: 'KHAKI',   keys: { up: 'Numpad8', down: 'Numpad5', left: 'Numpad4', right: 'Numpad6', shoot: 'Numpad0' }, sx: 80, sy: 520, hint: 'NUM8456+0' }
+    ];
+
+    class Wall {
+        constructor(x, y, w, h) { this.x = x; this.y = y; this.w = w; this.h = h; this.hp = 5; }
+        draw() {
+            ctx.fillStyle = `rgba(58, 54, 45, ${this.hp/5})`;
+            ctx.fillRect(this.x, this.y, this.w, this.h);
+            ctx.strokeStyle = `rgba(139, 69, 19, ${this.hp/5})`;
+            ctx.strokeRect(this.x, this.y, this.w, this.h);
+        }
+    }
+
+    class Tank {
+        constructor(cfg, isBot) {
+            this.x = cfg.sx; this.y = cfg.sy; this.angle = Math.random()*6;
+            this.color = cfg.color; this.name = cfg.name; this.keys = cfg.keys;
+            this.isBot = isBot; this.alive = true; this.cooldown = 0;
+            this.kills = 0; this.speed = 1.8; this.stuckTimer = 0;
+        }
+
+        update() {
+            if (!this.alive) return;
+            if (this.cooldown > 0) this.cooldown--;
+            let move = 0;
+
+            if (this.isBot) {
+                move = this.runAI();
+            } else {
+                if (keys[this.keys.left]) this.angle -= 0.04;
+                if (keys[this.keys.right]) this.angle += 0.04;
+                if (keys[this.keys.up]) move = this.speed;
+                if (keys[this.keys.down]) move = -this.speed * 0.5;
+                if (keys[this.keys.shoot] && this.cooldown === 0) this.shoot();
+                
+                const nx = this.x + Math.cos(this.angle) * move;
+                const ny = this.y + Math.sin(this.angle) * move;
+                if (!this.collides(nx, ny)) { this.x = nx; this.y = ny; this.stuckTimer = 0; }
+                else { this.stuckTimer++; }
+            }
+            if (Math.abs(move) > 0.1 && Math.random() < 0.3) tracks.push({x: this.x, y: this.y, a: this.angle, life: 1.0});
+        }
+
+        runAI() {
+            let bestTarget = null; let minDist = 1000;
+            tanks.forEach(t => { if(t !== this && t.alive) { let d = Math.hypot(t.x-this.x, t.y-this.y); if(d < minDist) { minDist = d; bestTarget = t; } } });
+            if (!bestTarget) return 0;
+
+            let targetA = Math.atan2(bestTarget.y - this.y, bestTarget.x - this.x);
+            let diff = targetA - this.angle;
+            while(diff > Math.PI) diff -= Math.PI*2; while(diff < -Math.PI) diff += Math.PI*2;
+            this.angle += Math.sign(diff) * 0.04;
+
+            if (this.cooldown === 0) {
+                if (Math.abs(diff) < 0.2 || this.stuckTimer > 40) this.shoot();
+            }
+
+            let move = (minDist > 160) ? this.speed : (minDist < 100 ? -this.speed : 0);
+            const nx = this.x + Math.cos(this.angle) * move, ny = this.y + Math.sin(this.angle) * move;
+            if (this.collides(nx, ny)) { this.stuckTimer++; this.angle += 0.05; return -0.5; }
+            else { this.x = nx; this.y = ny; this.stuckTimer = 0; return move; }
+        }
+
+        collides(nx, ny) {
+            if (nx < 20 || nx > 780 || ny < 20 || ny > 580) return true;
+            return walls.some(w => nx+14 > w.x && nx-14 < w.x+w.w && ny+14 > w.y && ny-14 < w.y+w.h);
+        }
+
+        shoot() {
+            this.cooldown = 75; triggerShake(3);
+            bullets.push(new Bullet(this.x + Math.cos(this.angle)*25, this.y + Math.sin(this.angle)*25, this.angle, this));
+        }
+
+        die() {
+            this.alive = false; triggerShake(15);
+            for(let i=0; i<20; i++) particles.push(new Particle(this.x, this.y, '#333', 6, 1));
+        }
+
+        draw() {
+            if (!this.alive) return;
+            ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+            ctx.fillStyle = '#111'; ctx.fillRect(-18, -20, 36, 8); ctx.fillRect(-18, 12, 36, 8);
+            ctx.fillStyle = this.color; ctx.fillRect(-14, -14, 28, 28);
+            ctx.fillStyle = '#222'; ctx.fillRect(0, -3, 30, 6);
+            ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class Bullet {
+        constructor(x, y, a, owner) {
+            this.x = x; this.y = y; this.vx = Math.cos(a)*7.5; this.vy = Math.sin(a)*7.5;
+            this.owner = owner; this.active = true; this.bounces = 1;
+        }
+        update() {
+            this.x += this.vx; this.y += this.vy;
+            for (let i = walls.length - 1; i >= 0; i--) {
+                let w = walls[i];
+                if (this.x > w.x && this.x < w.x+w.w && this.y > w.y && this.y < w.y+w.h) {
+                    w.hp--; if (w.hp <= 0) walls.splice(i, 1);
+                    if (this.bounces > 0) { this.reflect(w); this.bounces--; } else this.active = false;
+                    return;
+                }
+            }
+            if (this.x < 5 || this.x > 795) { if(this.bounces > 0) { this.vx *= -1; this.bounces--; } else this.active = false; }
+            if (this.y < 5 || this.y > 595) { if(this.bounces > 0) { this.vy *= -1; this.bounces--; } else this.active = false; }
+            tanks.forEach(t => { if (t.alive && t !== this.owner && Math.hypot(this.x - t.x, this.y - t.y) < 18) { t.die(); this.active = false; this.owner.kills++; } });
+        }
+        reflect(w) {
+            const dL = Math.abs(this.x - w.x), dR = Math.abs(this.x - (w.x+w.w));
+            const dT = Math.abs(this.y - w.y), dB = Math.abs(this.y - (w.y+w.h));
+            const min = Math.min(dL, dR, dT, dB);
+            if (min === dL || min === dR) this.vx *= -1; else this.vy *= -1;
+        }
+        draw() { ctx.fillStyle = '#ffaa00'; ctx.beginPath(); ctx.arc(this.x, this.y, 4, 0, Math.PI*2); ctx.fill(); }
+    }
+
+    class Particle {
+        constructor(x, y, c, s, l) {
+            this.x = x; this.y = y; this.c = c; this.s = s; this.l = l;
+            this.vx = (Math.random()-0.5)*8; this.vy = (Math.random()-0.5)*8;
+        }
+        update() { this.x += this.vx; this.y += this.vy; this.l -= 0.02; }
+        draw() { ctx.globalAlpha = Math.max(0, this.l); ctx.fillStyle = this.c; ctx.beginPath(); ctx.arc(this.x, this.y, this.s, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1; }
+    }
+
+    function triggerShake(amt) { shakeIntensity = amt; }
+
+    function buildMap() {
+        walls = [
+            new Wall(350, 50, 100, 40), new Wall(350, 510, 100, 40),
+            new Wall(180, 180, 40, 240), new Wall(580, 180, 40, 240),
+            new Wall(300, 280, 200, 40), new Wall(100, 400, 60, 20), new Wall(640, 180, 60, 20)
+        ];
+    }
+
+    function startGame() {
+        const pc = parseInt(document.getElementById('playerCount').value);
+        menu.classList.add('hidden'); uiOverlay.classList.remove('hidden'); 
+        hud.classList.remove('hidden'); canvas.style.display = 'block';
+        
+        tanks = pConfigs.map((c, i) => new Tank(c, i >= pc));
+        
+        hud.innerHTML = pConfigs.slice(0, pc).map(c => 
+            `<div class="hud-box" style="border-color:${c.color}">[ ${c.name} ] ${c.hint}</div>`
+        ).join('');
+
+        bullets = []; particles = []; tracks = []; buildMap();
+        gameActive = true; loop();
+    }
+
+    function loop() {
+        if (!gameActive) return;
+        ctx.save();
+        if (shakeIntensity > 0.5) { ctx.translate((Math.random()-0.5)*shakeIntensity, (Math.random()-0.5)*shakeIntensity); shakeIntensity *= 0.9; }
+        ctx.fillStyle = '#26241e'; ctx.fillRect(0,0,800,600);
+        ctx.strokeStyle = 'rgba(139, 69, 19, 0.1)';
+        for(let i=0; i<800; i+=40) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,600); ctx.stroke(); }
+        for(let i=0; i<600; i+=40) { ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(800,i); ctx.stroke(); }
+
+        walls.forEach(w => w.draw());
+        bullets = bullets.filter(b => b.active);
+        bullets.forEach(b => { b.update(); b.draw(); });
+        tanks.forEach(t => { t.update(); t.draw(); });
+        particles = particles.filter(p => p.l > 0);
+        particles.forEach(p => { p.update(); p.draw(); });
+
+        ctx.restore();
+        uiOverlay.innerHTML = tanks.map(t => `<div style="color:${t.color}">[ ${t.isBot ? 'TIN-MAN' : t.name} ] TAGS: ${t.kills}</div>`).join('');
+
+        const alive = tanks.filter(t => t.alive);
+        if (alive.length <= 1) {
+            gameActive = false;
+            setTimeout(() => {
+                canvas.style.display = 'none'; hud.classList.add('hidden');
+                gameOverScreen.classList.remove('hidden');
+                winnerText.innerText = alive.length ? `${alive[0].isBot ? 'TIN-MAN' : alive[0].name} STANDING` : "TOTAL WIPEOUT";
+            }, 1000);
+        }
+        if (gameActive) requestAnimationFrame(loop);
+    }
+
+    function returnToMenu() { gameOverScreen.classList.add('hidden'); menu.classList.remove('hidden'); }
+</script>
+</body>
+</html>
